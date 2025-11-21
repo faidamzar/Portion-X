@@ -1,0 +1,986 @@
+#!/usr/bin/env python3
+# main.py — CLI meal recommender with enhanced profile storage
+# Now saves allergies, medical conditions, dietary preferences to profile
+
+import os
+import sys
+import json
+import random
+import csv
+import math
+import zipfile
+from datetime import datetime
+from copy import deepcopy
+
+# -------------------------
+# ANSI colors (simple)
+# -------------------------
+class Col:
+    BOLD = "\033[1m"
+    END = "\033[0m"
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+
+def cl(text, color=""):
+    if color:
+        return f"{color}{text}{Col.END}"
+    return text
+
+# -------------------------
+# Paths and outputs
+# -------------------------
+DATA_PATH = os.path.join("data", "foods.json")
+OUTPUT_DIR = "output"
+PROFILE_PATH = os.path.join(OUTPUT_DIR, "profiles.json")
+GENERATED_PREFIX = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
+
+# -------------------------
+# Utilities: I/O & JSON
+# -------------------------
+def load_json(path):
+    if not os.path.exists(path):
+        print(cl(f"ERROR: database file not found: {path}", Col.RED))
+        print("Letakkan foods.json di folder 'data/'. Kalau belum ada, minta saya membuat contoh.")
+        sys.exit(1)
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+# -------------------------
+# Normalizer for item fields
+# -------------------------
+def pick_field(item, names, default=0):
+    for n in names:
+        if n in item:
+            return item[n]
+    for k, v in item.items():
+        if k.lower() in [n.lower() for n in names]:
+            return v
+    return default
+
+def normalize_item(raw):
+    name = raw.get("name") or raw.get("nama") or raw.get("title") or str(raw)
+    cat = raw.get("category") or raw.get("kategori") or raw.get("type") or ""
+    kcal = pick_field(raw, ["kcal","kalori","energi"], 0)
+    carbs = pick_field(raw, ["carbs","karbohidrat","karbo"], 0)
+    protein = pick_field(raw, ["protein"], 0)
+    fat = pick_field(raw, ["fat","lemak"], 0)
+    fiber = pick_field(raw, ["fiber","serat"], 0)
+    sugar = pick_field(raw, ["sugar","gula"], 0)
+    sodium = pick_field(raw, ["sodium","natrium"], 0)
+    price = pick_field(raw, ["price","harga","cost"], 0)
+    def num(x):
+        try:
+            return float(x)
+        except:
+            return 0.0
+    item = {
+        "name": str(name),
+        "category": str(cat).lower(),
+        "kcal": int(round(num(kcal))),
+        "carbs": round(num(carbs),1),
+        "protein": round(num(protein),1),
+        "fat": round(num(fat),1),
+        "fiber": round(num(fiber),1),
+        "sugar": round(num(sugar),1),
+        "sodium": int(round(num(sodium))),
+        "price": int(round(num(price)))
+    }
+    return item
+
+# -------------------------
+# Build pools
+# -------------------------
+def build_pools(db):
+    pools = {"carb":[], "protein":[], "vegetable":[], "fruit":[], "drink":[]}
+    if isinstance(db, dict):
+        possible_lists = {}
+        for k,v in db.items():
+            possible_lists[k.lower()] = v
+        for k,v in possible_lists.items():
+            if isinstance(v, list):
+                key = None
+                if any(s in k for s in ("carb","karbo","nasi","roti","mie","kentang","ubi")):
+                    key = "carb"
+                elif "protein" in k or any(s in k for s in ("ayam","ikan","tempe","tahu","daging","telur")):
+                    key = "protein"
+                elif any(s in k for s in ("veg","sayur","sayuran","vegetable","sayur")):
+                    key = "vegetable"
+                elif any(s in k for s in ("fruit","buah","apple","mango","apel")):
+                    key = "fruit"
+                elif any(s in k for s in ("drink","minum","air","jus","susu","teh")):
+                    key = "drink"
+                if key:
+                    for raw in v:
+                        pools[key].append(normalize_item(raw))
+                else:
+                    for raw in v:
+                        item = normalize_item(raw)
+                        cat = item["category"]
+                        if cat and cat in ("carbohydrate","carb","karbo","karbohidrat","nasi","roti","mie"):
+                            pools["carb"].append(item)
+                        elif cat and "protein" in cat or cat in ("hewani","nabati","ayam","ikan","daging","tempe","tahu"):
+                            pools["protein"].append(item)
+                        elif cat and cat in ("vegetable","sayur","sayuran"):
+                            pools["vegetable"].append(item)
+                        elif cat and cat in ("fruit","buah"):
+                            pools["fruit"].append(item)
+                        elif cat and cat in ("drink","minum","beverage"):
+                            pools["drink"].append(item)
+                        else:
+                            name = item["name"].lower()
+                            if any(tok in name for tok in ("nasi","roti","mie","kentang","ubi","bubur","singkong","lontong")):
+                                pools["carb"].append(item)
+                            elif any(tok in name for tok in ("ayam","ikan","telur","tempe","tahu","daging","sosis","udang","cumi")):
+                                pools["protein"].append(item)
+                            elif any(tok in name for tok in ("sayur","bayam","kangkung","wortel","tumis","salad","brokoli")):
+                                pools["vegetable"].append(item)
+                            elif any(tok in name for tok in ("apel","pisang","jeruk","mangga","buah","nanas","pepaya")):
+                                pools["fruit"].append(item)
+                            elif any(tok in name for tok in ("air","teh","jus","susu","es","bandrek","bajigur")):
+                                pools["drink"].append(item)
+                            else:
+                                pools["carb"].append(item)
+    elif isinstance(db, list):
+        for raw in db:
+            item = normalize_item(raw)
+            cat = item["category"]
+            if cat in ("carb","carbohydrate","karbohidrat","karbo","nasi","roti","mie"):
+                pools["carb"].append(item)
+            elif cat in ("protein","hewani","nabati","ayam","ikan","telur","tempe","tahu","daging"):
+                pools["protein"].append(item)
+            elif cat in ("vegetable","sayur","sayuran"):
+                pools["vegetable"].append(item)
+            elif cat in ("fruit","buah"):
+                pools["fruit"].append(item)
+            elif cat in ("drink","minum","beverage"):
+                pools["drink"].append(item)
+            else:
+                name = item["name"].lower()
+                if any(tok in name for tok in ("air","teh","jus","susu")):
+                    pools["drink"].append(item)
+                elif any(tok in name for tok in ("apel","pisang","jeruk","mangga","buah")):
+                    pools["fruit"].append(item)
+                elif any(tok in name for tok in ("sayur","bayam","kangkung","wortel","tumis")):
+                    pools["vegetable"].append(item)
+                elif any(tok in name for tok in ("ayam","ikan","telur","tempe","tahu","daging","sosis")):
+                    pools["protein"].append(item)
+                else:
+                    pools["carb"].append(item)
+    for k in list(pools.keys()):
+        if not pools[k]:
+            cand = []
+            if isinstance(db, dict):
+                for v in db.values():
+                    if isinstance(v, list):
+                        for raw in v:
+                            cand.append(normalize_item(raw))
+            else:
+                cand = [normalize_item(r) for r in db]
+            pools[k] = cand[:10]
+    return pools
+
+# -------------------------
+# Nutrient aggregator
+# -------------------------
+def sum_nutrients(items):
+    s = {"kcal":0,"carbs":0.0,"protein":0.0,"fat":0.0,"fiber":0.0,"sugar":0.0,"sodium":0,"price":0}
+    for it in items:
+        s["kcal"] += int(it.get("kcal",0))
+        s["carbs"] += float(it.get("carbs",0))
+        s["protein"] += float(it.get("protein",0))
+        s["fat"] += float(it.get("fat",0))
+        s["fiber"] += float(it.get("fiber",0))
+        s["sugar"] += float(it.get("sugar",0))
+        s["sodium"] += int(it.get("sodium",0))
+        s["price"] += int(it.get("price",0))
+    s["carbs"] = round(s["carbs"],1)
+    s["protein"] = round(s["protein"],1)
+    s["fat"] = round(s["fat"],1)
+    s["fiber"] = round(s["fiber"],1)
+    s["sugar"] = round(s["sugar"],1)
+    return s
+
+# -------------------------
+# Medical rules thresholds
+# -------------------------
+SODIUM_IDEAL_PER_MEAL = 1500
+SODIUM_MAX_PER_MEAL = 2000
+SUGAR_DIABETES_LIMIT = 25
+
+def check_medical_constraints(summary, kondisi):
+    notes = []
+    if "hipertensi" in kondisi or "hypertension" in kondisi:
+        if summary["sodium"] > SODIUM_MAX_PER_MEAL:
+            return False, "Sodium terlalu tinggi (>2000 mg) untuk hipertensi"
+        if summary["sodium"] > SODIUM_IDEAL_PER_MEAL:
+            notes.append("Sodium diatas ideal (1500 mg) — hati-hati")
+    if "diabetes" in kondisi or "diabetic" in kondisi:
+        if summary["sugar"] > SUGAR_DIABETES_LIMIT:
+            return False, "Gula terlalu tinggi untuk diabetes"
+        if summary["carbs"] > 120:
+            notes.append("Karbohidrat tinggi (>120 g) — kontrol porsi")
+    return True, "; ".join(notes) if notes else "OK"
+
+# -------------------------
+# Allergy matching with aliases
+# -------------------------
+ALLERGY_ALIAS = {
+    "seafood": ["ikan","udang","cumi","kepiting","kerang","sarden","tuna","salmon","seafood","kerang"],
+    "gluten": ["roti","mie","tepung","bakpao","donat","kue","biskuit","roti","pasta"],
+    "lactose": ["susu","milk","keju","cheese","yogurt","yoghurt","butter","mentega"],
+    "nuts": ["kacang","almond","hazelnut","peanut","kismis","walnut","cashew"],
+    "soy": ["kedelai","soya","soy","tempe","tahu"],
+    "egg": ["telur","omelet","scrambled","omelette"],
+    "sesame": ["wijen","sesame","tahini"],
+}
+
+def matches_allergy(item, allergies):
+    name = item["name"].lower()
+    for a in allergies:
+        a = a.strip().lower()
+        if not a:
+            continue
+        if a in name:
+            return True
+        if a in ALLERGY_ALIAS:
+            toks = ALLERGY_ALIAS[a]
+            if any(tok in name for tok in toks):
+                return True
+    return False
+
+def filter_pool(pool, prefs):
+    out = []
+    for it in pool:
+        if prefs.get("vegetarian") and it["category"] in ("protein","hewani","daging","ayam","ikan"):
+            if not any(x in it["name"].lower() for x in ("tempe","tahu","kedelai","kacang")):
+                continue
+        if prefs.get("no_seafood") and any(tok in it["name"].lower() for tok in ("ikan","udang","cumi","kepiting","kerang","sarden","tuna")):
+            continue
+        if prefs.get("alergies") and matches_allergy(it, prefs["alergies"]):
+            continue
+        out.append(it)
+    return out if out else pool[:]
+
+# -------------------------
+# Portion adjustment helpers
+# -------------------------
+def scale_item(item, factor):
+    it = deepcopy(item)
+    it["kcal"] = int(round(it.get("kcal",0) * factor))
+    it["carbs"] = round(it.get("carbs",0) * factor, 1)
+    it["protein"] = round(it.get("protein",0) * factor, 1)
+    it["fat"] = round(it.get("fat",0) * factor, 1)
+    it["fiber"] = round(it.get("fiber",0) * factor, 1)
+    it["sugar"] = round(it.get("sugar",0) * factor, 1)
+    it["sodium"] = int(round(it.get("sodium",0) * factor))
+    it["price"] = int(round(it.get("price",0) * factor))
+    if factor != 1.0:
+        it["name"] = f"{it['name']} (porsi x{factor})"
+    return it
+
+def apply_portion_adjustments(comps, multipliers):
+    scaled = []
+    for comp in comps:
+        cat = comp.get("category","").lower()
+        factor = multipliers.get(cat, 1.0)
+        scaled.append(scale_item(comp, factor))
+    return scaled
+
+# -------------------------
+# Combination picker
+# -------------------------
+def pick_best_combination(pools, prefs, budget=None, target_kcal=None, tries=2000):
+    carbs_pool = filter_pool(pools["carb"], prefs)
+    protein_pool = filter_pool(pools["protein"], prefs)
+    veg_pool = filter_pool(pools["vegetable"], prefs)
+    fruit_pool = filter_pool(pools["fruit"], prefs)
+    drink_pool = filter_pool(pools["drink"], prefs)
+
+    candidates = []
+    for _ in range(tries):
+        c = random.choice(carbs_pool)
+        p = random.choice(protein_pool)
+        v = random.choice(veg_pool)
+        f = random.choice(fruit_pool)
+        d = random.choice(drink_pool)
+        comps = [c,p,v,f,d]
+        summ = sum_nutrients(comps)
+        if budget is not None and summ["price"] > budget:
+            continue
+        ok, note = check_medical_constraints(summ, prefs.get("kondisi",[]))
+        if not ok:
+            continue
+        if target_kcal:
+            score = abs(summ["kcal"] - target_kcal)
+        else:
+            score = abs(summ["kcal"] - 600)
+        score = (score, summ["price"])
+        candidates.append((score, summ, comps, note))
+        if len(candidates) >= 400:
+            break
+    if not candidates:
+        def cheapest(pool):
+            return sorted(pool, key=lambda x: x.get("price",999999))[0]
+        c = cheapest(carbs_pool); p = cheapest(protein_pool); v = cheapest(veg_pool); f = cheapest(fruit_pool); d = cheapest(drink_pool)
+        comps = [c,p,v,f,d]
+        summ = sum_nutrients(comps)
+        ok, note = check_medical_constraints(summ, prefs.get("kondisi",[]))
+        return comps, summ, note
+    candidates.sort(key=lambda x: x[0])
+    best = candidates[0]
+    return best[2], best[1], best[3]
+
+# -------------------------
+# Recommendation wrappers
+# -------------------------
+def recommend_for_person(tdee, pools, prefs, multipliers=None):
+    meal_target = int(round(tdee * 0.35))
+    comps, summ, note = pick_best_combination(pools, prefs, budget=None, target_kcal=meal_target)
+    if multipliers:
+        comps = apply_portion_adjustments(comps, multipliers)
+        summ = sum_nutrients(comps)
+        ok, note2 = check_medical_constraints(summ, prefs.get("kondisi",[]))
+        if not ok:
+            note = note2
+        else:
+            if note2 and note2 != "OK":
+                note = f"{note}; {note2}" if note else note2
+    return comps, summ, note
+
+def recommend_for_mbg(group_key, pools, prefs, multipliers=None):
+    targets = {"PAUD":900, "SD":1400, "SMP":2000, "IBU":2300}
+    target_daily = targets.get(group_key,1400)
+    budget = 10000
+    comps, summ, note = pick_best_combination(pools, prefs, budget=budget, target_kcal=int(round(target_daily * 0.35)))
+    if multipliers:
+        comps = apply_portion_adjustments(comps, multipliers)
+        summ = sum_nutrients(comps)
+    if summ["price"] > budget:
+        comps = [sorted(filter_pool(pools[k], prefs), key=lambda x: x.get("price",999999))[0] for k in ("carb","protein","vegetable","fruit","drink")]
+        if multipliers:
+            comps = apply_portion_adjustments(comps, multipliers)
+        summ = sum_nutrients(comps)
+        note = "Strategi biaya rendah"
+    return comps, summ, note
+
+# -------------------------
+# Planner 7 days
+# -------------------------
+def planner_7_days(tdee, pools, prefs, multipliers=None, allow_repeat=False):
+    week = {}
+    seen = set()
+    attempts = 0
+    day = 1
+    while day <= 7 and attempts < 2000:
+        attempts += 1
+        comps, summ, note = recommend_for_person(tdee, pools, prefs, multipliers)
+        key = tuple([c["name"] for c in comps])
+        if not allow_repeat and key in seen:
+            continue
+        seen.add(key)
+        week[f"Hari {day}"] = {"components": comps, "summary": summ, "note": note}
+        day += 1
+    while day <= 7:
+        comps, summ, note = recommend_for_person(tdee, pools, prefs, multipliers)
+        week[f"Hari {day}"] = {"components": comps, "summary": summ, "note": note}
+        day += 1
+    return week
+
+# -------------------------
+# Exporters: CSV & HTML
+# -------------------------
+def export_single_csv(comps, summ, filename=None):
+    if not filename:
+        filename = f"rekom_{GENERATED_PREFIX}.csv"
+    path = os.path.join(OUTPUT_DIR, filename)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Komponen","Nama","Kcal","Carbs(g)","Protein(g)","Fat(g)","Fiber(g)","Sugar(g)","Sodium(mg)","Harga(Rp)"])
+        for comp in comps:
+            w.writerow([comp["category"], comp["name"], comp["kcal"], comp["carbs"], comp["protein"], comp["fat"], comp["fiber"], comp["sugar"], comp["sodium"], comp["price"]])
+        w.writerow([])
+        w.writerow(["TOTAL","", summ["kcal"], summ["carbs"], summ["protein"], summ["fat"], summ["fiber"], summ["sugar"], summ["sodium"], summ["price"]])
+    return path
+
+def export_week_csv(week, filename=None):
+    if not filename:
+        filename = f"planner7_{GENERATED_PREFIX}.csv"
+    path = os.path.join(OUTPUT_DIR, filename)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Hari","Karbo","Protein","Sayur","Buah","Minum","Kcal","Carbs","Protein(g)","Fat","Fiber","Sugar","Sodium","Harga"])
+        for day, info in week.items():
+            comps = info["components"]
+            s = info["summary"]
+            w.writerow([day, comps[0]["name"], comps[1]["name"], comps[2]["name"], comps[3]["name"], comps[4]["name"], s["kcal"], s["carbs"], s["protein"], s["fat"], s["fiber"], s["sugar"], s["sodium"], s["price"]])
+    return path
+
+def export_single_html(comps, summ, title="Rekomendasi Menu", filename=None):
+    if not filename:
+        filename = f"rekom_{GENERATED_PREFIX}.html"
+    path = os.path.join(OUTPUT_DIR, filename)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = ""
+    for comp in comps:
+        rows += f"<tr><td>{comp['category']}</td><td>{comp['name']}</td><td>{comp['kcal']}</td><td>{comp['carbs']}</td><td>{comp['protein']}</td><td>{comp['fat']}</td><td>{comp['fiber']}</td><td>{comp['sugar']}</td><td>{comp['sodium']}</td><td>Rp {comp['price']}</td></tr>\n"
+    total_row = f"<tr><th colspan='2'>TOTAL</th><td>{summ['kcal']}</td><td>{summ['carbs']}</td><td>{summ['protein']}</td><td>{summ['fat']}</td><td>{summ['fiber']}</td><td>{summ['sugar']}</td><td>{summ['sodium']}</td><td>Rp {summ['price']}</td></tr>"
+    html = f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+body{{font-family:Segoe UI, Roboto, Arial; padding:20px;}}
+table{{border-collapse:collapse; width:100%;}}
+th,td{{border:1px solid #ddd; padding:8px; text-align:left;}}
+th{{background:#f2f2f2;}}
+.header{{margin-bottom:12px;}}
+.small{{color:#666; font-size:0.9em;}}
+</style>
+</head>
+<body>
+<div class="header"><h2>{title}</h2><div class="small">Generated: {now}</div></div>
+<table>
+<thead><tr><th>Komponen</th><th>Nama</th><th>Kcal</th><th>Carbs(g)</th><th>Protein(g)</th><th>Fat(g)</th><th>Fiber(g)</th><th>Sugar(g)</th><th>Sodium(mg)</th><th>Harga</th></tr></thead>
+<tbody>
+{rows}
+{total_row}
+</tbody>
+</table>
+</body>
+</html>
+"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    return path
+
+def export_week_html(week, title="Planner 7 Hari", filename=None):
+    if not filename:
+        filename = f"planner7_{GENERATED_PREFIX}.html"
+    path = os.path.join(OUTPUT_DIR, filename)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = ""
+    for day, info in week.items():
+        comps = info["components"]
+        s = info["summary"]
+        comps_text = " | ".join([c["name"] for c in comps])
+        rows += f"<tr><td>{day}</td><td>{comps_text}</td><td>{s['kcal']}</td><td>{s['carbs']}</td><td>{s['protein']}</td><td>{s['fat']}</td><td>{s['fiber']}</td><td>{s['sugar']}</td><td>{s['sodium']}</td><td>Rp {s['price']}</td></tr>\n"
+    html = f"""<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>{title}</title>
+<style>
+body{{font-family:Segoe UI, Roboto, Arial; padding:20px;}}
+table{{border-collapse:collapse; width:100%;}}
+th,td{{border:1px solid #ddd; padding:8px; text-align:left;}}
+th{{background:#f2f2f2;}}
+</style></head><body>
+<h2>{title}</h2><div class="small">Generated: {now}</div>
+<table><thead><tr><th>Hari</th><th>Komponen</th><th>Kcal</th><th>Carbs</th><th>Protein(g)</th><th>Fat</th><th>Fiber</th><th>Sugar</th><th>Sodium</th><th>Harga</th></tr></thead><tbody>
+{rows}
+</tbody></table></body></html>
+"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    return path
+
+# -------------------------
+# ZIP final exporter
+# -------------------------
+def make_zip_final(files, zipname=None):
+    if not zipname:
+        zipname = f"rekom_final_{GENERATED_PREFIX}.zip"
+    zip_path = os.path.join(OUTPUT_DIR, zipname)
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for fpath in files:
+            if os.path.exists(fpath):
+                arcname = os.path.basename(fpath)
+                z.write(fpath, arcname=arcname)
+    return zip_path
+
+# -------------------------
+# Display helpers
+# -------------------------
+def print_box(lines, title=None, color=Col.CYAN):
+    w = max(len(l) for l in lines + ([title] if title else []))
+    top = "┌" + "─"*(w+2) + "┐"
+    bot = "└" + "─"*(w+2) + "┘"
+    if title:
+        title_line = f" {title} ".center(w+2, " ")
+        print(cl(top, color))
+        print(cl("│" + title_line + "│", color))
+        print(cl("├" + "─"*(w+2) + "┤", color))
+    else:
+        print(cl(top, color))
+    for l in lines:
+        print(cl("│ " + l.ljust(w) + " │", color))
+    print(cl(bot, color))
+
+def show_single_result(name, comps, summ, note=None):
+    lines = [f"Untuk: {name}", ""]
+    for comp in comps:
+        lines.append(f"- {comp['name']} ({comp['category']}) | kcal:{comp['kcal']} | harga:Rp{comp['price']}")
+    lines.append("")
+    lines.append("Ringkasan nutrisi:")
+    lines.append(f" Energi  : {summ['kcal']} kcal")
+    lines.append(f" Karbo   : {summ['carbs']} g")
+    lines.append(f" Protein : {summ['protein']} g")
+    lines.append(f" Lemak   : {summ['fat']} g")
+    lines.append(f" Serat   : {summ['fiber']} g")
+    lines.append(f" Gula    : {summ['sugar']} g")
+    lines.append(f" Sodium  : {summ['sodium']} mg")
+    lines.append(f" Harga   : Rp {summ['price']}")
+    if note:
+        lines.append("")
+        lines.append(f"Catatan: {note}")
+    print_box(lines, title="REKOMENDASI MENU", color=Col.GREEN)
+
+def show_week_plan(week):
+    lines = []
+    for day, info in week.items():
+        comps = info["components"]
+        s = info["summary"]
+        lines.append(f"{day} — {comps[0]['name']} | {comps[1]['name']} | {comps[2]['name']} | {comps[3]['name']} | {comps[4]['name']}")
+        lines.append(f"  kcal:{s['kcal']} | price:Rp{s['price']} | carbs:{s['carbs']}g protein:{s['protein']}g fat:{s['fat']}g sugar:{s['sugar']}g sodium:{s['sodium']}mg")
+        lines.append("")
+    print_box(lines, title="PLANNER 7 HARI", color=Col.BLUE)
+
+# -------------------------
+# Input helpers
+# -------------------------
+def ask(prompt, cast=str, default=None, choices=None):
+    while True:
+        v = input(prompt).strip()
+        if v == "" and default is not None:
+            return default
+        if choices and v not in choices:
+            print(cl("Masukkan salah. Pilih salah satu dari: " + str(choices), Col.RED))
+            continue
+        try:
+            return cast(v)
+        except:
+            print(cl("Format input tidak valid. Coba lagi.", Col.RED))
+
+def ask_yesno(prompt, default="n"):
+    v = input(prompt + f" (y/n) [{default}]: ").strip().lower()
+    if v == "":
+        v = default
+    return v in ("y","yes","ya")
+
+# -------------------------
+# Profile persistence (ENHANCED WITH PREFS + BUG FIX)
+# -------------------------
+def load_profiles():
+    if not os.path.exists(PROFILE_PATH):
+        return {}
+    try:
+        with open(PROFILE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_profiles(profiles):
+    save_json(PROFILE_PATH, profiles)
+
+def profile_menu():
+    profiles = load_profiles()
+    while True:
+        print(cl("\nMANAGE PROFIL PRIBADI", Col.CYAN))
+        print("1. Buat/Update profil baru")
+        print("2. Muat profil")
+        print("3. Hapus profil")
+        print("4. Daftar profil")
+        print("0. Kembali")
+        sel = input("Pilihan: ").strip()
+        
+        if sel == "1":
+            name = input("Nama profil (unik): ").strip()
+            if not name:
+                print(cl("Nama kosong.", Col.RED))
+                continue
+            usia = int(input("Usia (tahun): ").strip() or "0")
+            sex = input("Jenis kelamin (L/P) [L]: ").strip().lower() or "l"
+            tinggi = float(input("Tinggi (cm): ").strip() or "0")
+            berat = float(input("Berat (kg): ").strip() or "0")
+            aktivitas = input("Aktivitas (1-5, default 3): ").strip() or "3"
+            
+            # NEW: Ask for preferences
+            print(cl("\n--- Preferensi Makanan & Kesehatan ---", Col.YELLOW))
+            alergi_raw = input("Alergi (pisah koma, contoh: seafood,gluten,lactose) [kosong]: ").strip().lower()
+            alergi = [a.strip() for a in alergi_raw.split(",") if a.strip()]
+            kondisi_raw = input("Kondisi medis (pisah koma, contoh: diabetes,hipertensi) [kosong]: ").strip().lower()
+            kondisi = [c.strip() for c in kondisi_raw.split(",") if c.strip()]
+            vegetarian = ask_yesno("Vegetarian (tanpa daging & ikan)? ", default="n")
+            no_seafood = ask_yesno("Tanpa seafood? ", default="n")
+            
+            profiles[name] = {
+                "usia": usia, 
+                "sex": sex, 
+                "tinggi": tinggi, 
+                "berat": berat, 
+                "aktivitas": int(aktivitas),
+                "alergi": alergi,
+                "kondisi": kondisi,
+                "vegetarian": vegetarian,
+                "no_seafood": no_seafood
+            }
+            save_profiles(profiles)
+            print(cl("Profil tersimpan dengan preferensi lengkap.", Col.GREEN))
+        
+        elif sel == "2":
+            if not profiles:
+                print(cl("Belum ada profil tersimpan.", Col.YELLOW))
+                continue
+            print("Pilih profil:")
+            keys = list(profiles.keys())
+            for i,k in enumerate(keys,1):
+                p = profiles[k]
+                info = f"{k} - {p.get('usia',0)}th"
+                if p.get('alergi'):
+                    info += f" | Alergi: {','.join(p['alergi'])}"
+                if p.get('kondisi'):
+                    info += f" | Kondisi: {','.join(p['kondisi'])}"
+                print(f" {i}. {info}")
+            
+            # BUG FIX: Tambahkan try-except untuk input validation
+            try:
+                idx = int(input("No profil: ").strip() or "0")
+            except ValueError:
+                print(cl("Input harus berupa angka.", Col.RED))
+                continue
+            
+            if idx <= 0 or idx > len(keys):
+                print(cl("Pilihan tidak valid.", Col.RED))
+                continue
+            name = keys[idx-1]
+            print(cl(f"Profil '{name}' dimuat.", Col.GREEN))
+            return name, profiles[name]
+        
+        elif sel == "3":
+            if not profiles:
+                print(cl("Belum ada profil.", Col.YELLOW))
+                continue
+            print("Pilih profil untuk dihapus:")
+            keys = list(profiles.keys())
+            for i,k in enumerate(keys,1):
+                print(f" {i}. {k}")
+            
+            # BUG FIX: Tambahkan try-except untuk input validation
+            try:
+                idx = int(input("No profil: ").strip() or "0")
+            except ValueError:
+                print(cl("Input harus berupa angka.", Col.RED))
+                continue
+            
+            if idx <= 0 or idx > len(keys):
+                print(cl("Pilihan tidak valid.", Col.RED))
+                continue
+            name = keys[idx-1]
+            confirm = ask_yesno(f"Hapus profil '{name}'? ", default="n")
+            if confirm:
+                del profiles[name]
+                save_profiles(profiles)
+                print(cl("Dihapus.", Col.GREEN))
+        
+        elif sel == "4":
+            if not profiles:
+                print(cl("Tidak ada profil.", Col.YELLOW))
+                continue
+            lines = []
+            for i,k in enumerate(profiles.keys(), 1):
+                p = profiles[k]
+                info = f"{i}. {k} ({p.get('usia',0)}th, {p.get('sex','').upper()})"
+                if p.get('alergi'):
+                    info += f" - Alergi: {','.join(p['alergi'])}"
+                if p.get('kondisi'):
+                    info += f" - Kondisi: {','.join(p['kondisi'])}"
+                lines.append(info)
+            print_box(lines, title="DAFTAR PROFIL", color=Col.CYAN)
+        
+        elif sel == "0":
+            return None, None
+        else:
+            print(cl("Pilihan salah.", Col.RED))
+
+# -------------------------
+# Flow: PRIBADI
+# -------------------------
+def compute_tdee_from_profile(p):
+    usia = p.get("usia",0)
+    sex = p.get("sex","l")
+    tinggi = p.get("tinggi",0)
+    berat = p.get("berat",0)
+    aktivitas = p.get("aktivitas",3)
+    act_factor = {1:1.2,2:1.375,3:1.55,4:1.725,5:1.9}.get(aktivitas,1.55)
+    if sex.startswith("l"):
+        bmr = 10*berat + 6.25*tinggi - 5*usia + 5
+    else:
+        bmr = 10*berat + 6.25*tinggi - 5*usia - 161
+    tdee = int(round(bmr * act_factor))
+    return bmr, tdee
+
+def ask_portion_multipliers(defaults=None):
+    if defaults is None:
+        defaults = {"carb":1.0,"protein":1.0,"vegetable":1.0,"fruit":1.0,"drink":1.0}
+    print(cl("\nAtur porsi (default 1.0). Contoh: 1.0, 0.5, 1.5", Col.CYAN))
+    mul = {}
+    for k in ("carb","protein","vegetable","fruit","drink"):
+        v = input(f"Porsi untuk {k} [{defaults.get(k)}]: ").strip() or str(defaults.get(k))
+        try:
+            mul[k] = float(v)
+            if mul[k] <= 0:
+                mul[k] = defaults.get(k,1.0)
+        except:
+            mul[k] = defaults.get(k,1.0)
+    return mul
+
+def flow_pribadi(pools, loaded_profile=None):
+    print(cl("\nMODE: PRIBADI — Hitung kebutuhan & rekomendasi\n", Col.CYAN))
+    profiles = load_profiles()
+    if loaded_profile:
+        name = loaded_profile[0] if isinstance(loaded_profile, tuple) else None
+        pdata = loaded_profile[1] if isinstance(loaded_profile, tuple) else loaded_profile
+    else:
+        if profiles:
+            use = ask_yesno("Muat profil tersimpan? ", default="y")
+            if use:
+                name, pdata = profile_menu()
+            else:
+                pdata = None
+                name = None
+        else:
+            pdata = None
+            name = None
+    
+    if not pdata:
+        nama = input("Nama: ").strip() or "User"
+        usia = ask("Usia (tahun): ", int)
+        sex = input("Jenis kelamin (L/P) [L]: ").strip().lower() or "l"
+        tinggi = ask("Tinggi badan (cm): ", float)
+        berat = ask("Berat badan (kg): ", float)
+        aktivitas = ask("Pilih tingkat aktivitas harian (1-5) [3]: ", int, default=3)
+        
+        print(cl("\n--- Preferensi Makanan & Kesehatan ---", Col.YELLOW))
+        alergi_raw = input("Alergi (pisah koma, contoh: seafood,gluten,lactose) [kosong]: ").strip().lower()
+        alergi = [a.strip() for a in alergi_raw.split(",") if a.strip()]
+        kondisi_raw = input("Kondisi medis (pisah koma, contoh: diabetes,hipertensi) [kosong]: ").strip().lower()
+        kondisi = [c.strip() for c in kondisi_raw.split(",") if c.strip()]
+        vegetarian = ask_yesno("Vegetarian (tanpa daging & ikan)? ", default="n")
+        no_seafood = ask_yesno("Tanpa seafood? ", default="y")
+        
+        pdata = {
+            "usia": usia, 
+            "sex": sex, 
+            "tinggi": tinggi, 
+            "berat": berat, 
+            "aktivitas": int(aktivitas),
+            "alergi": alergi,
+            "kondisi": kondisi,
+            "vegetarian": vegetarian,
+            "no_seafood": no_seafood
+        }
+        
+        if ask_yesno("Simpan profil ini? ", default="y"):
+            profiles = load_profiles()
+            profile_name = input("Nama profil untuk disimpan: ").strip() or nama
+            profiles[profile_name] = pdata
+            save_profiles(profiles)
+            print(cl("Profil disimpan dengan preferensi lengkap.", Col.GREEN))
+        name = nama
+    else:
+        if not name:
+            name = input("Nama (untuk tampilan): ").strip() or "User"
+    
+    bmr, tdee = compute_tdee_from_profile(pdata)
+    info_lines = [f"Nama: {name}", f"BMR (perkiraan): {int(round(bmr))} kcal", f"TDEE (perkiraan): {tdee} kcal"]
+    
+    # Show saved preferences if available
+    if pdata.get('alergi'):
+        info_lines.append(f"Alergi tersimpan: {', '.join(pdata['alergi'])}")
+    if pdata.get('kondisi'):
+        info_lines.append(f"Kondisi tersimpan: {', '.join(pdata['kondisi'])}")
+    if pdata.get('vegetarian'):
+        info_lines.append("Preferensi: Vegetarian")
+    if pdata.get('no_seafood'):
+        info_lines.append("Preferensi: Tanpa seafood")
+    
+    print_box(info_lines, title="PROFIL & PERHITUNGAN ENERGI", color=Col.CYAN)
+
+    # Use saved preferences or allow override
+    prefs = {
+        "vegetarian": pdata.get("vegetarian", False),
+        "no_seafood": pdata.get("no_seafood", False),
+        "alergies": pdata.get("alergi", []),
+        "kondisi": pdata.get("kondisi", [])
+    }
+    
+    if ask_yesno("Ubah preferensi untuk sesi ini? ", default="n"):
+        alergi_raw = input(f"Alergi [{','.join(prefs['alergies'])}]: ").strip().lower()
+        if alergi_raw:
+            prefs["alergies"] = [a.strip() for a in alergi_raw.split(",") if a.strip()]
+        kondisi_raw = input(f"Kondisi medis [{','.join(prefs['kondisi'])}]: ").strip().lower()
+        if kondisi_raw:
+            prefs["kondisi"] = [c.strip() for c in kondisi_raw.split(",") if c.strip()]
+        prefs["vegetarian"] = ask_yesno("Vegetarian? ", default="y" if prefs["vegetarian"] else "n")
+        prefs["no_seafood"] = ask_yesno("Tanpa seafood? ", default="y" if prefs["no_seafood"] else "n")
+
+    multipliers = {"carb":1.0,"protein":1.0,"vegetable":1.0,"fruit":1.0,"drink":1.0}
+    if ask_yesno("Ingin mengatur porsi sebelum rekomendasi? ", default="n"):
+        multipliers = ask_portion_multipliers(multipliers)
+
+    single = ask_yesno("Tampilkan 1 rekomendasi menu sekarang? (y) Jika tidak, akan membuat planner 7 hari. ", default="y")
+    created_files = []
+    if single:
+        comps, summ, note = recommend_for_person(tdee, pools, prefs, multipliers)
+        show_single_result(name, comps, summ, note)
+        if ask_yesno("Ekspor rekomendasi ke CSV? ", default="y"):
+            path = export_single_csv(comps, summ, filename=f"rekom_{GENERATED_PREFIX}_single.csv")
+            created_files.append(path)
+            print(cl(f"Disimpan: {path}", Col.GREEN))
+        if ask_yesno("Ekspor juga ke HTML (print-friendly)? ", default="y"):
+            path = export_single_html(comps, summ, title=f"Rekomendasi Menu - {name}", filename=f"rekom_{GENERATED_PREFIX}_single.html")
+            created_files.append(path)
+            print(cl(f"Disimpan: {path}", Col.GREEN))
+    else:
+        week = planner_7_days(tdee, pools, prefs, multipliers, allow_repeat=False)
+        show_week_plan(week)
+        if ask_yesno("Ekspor planner 7 hari ke CSV? ", default="y"):
+            path = export_week_csv(week, filename=f"planner7_{GENERATED_PREFIX}.csv")
+            created_files.append(path)
+            print(cl(f"Disimpan: {path}", Col.GREEN))
+        if ask_yesno("Ekspor juga ke HTML (print-friendly)? ", default="y"):
+            path = export_week_html(week, title="Planner 7 Hari", filename=f"planner7_{GENERATED_PREFIX}.html")
+            created_files.append(path)
+            print(cl(f"Disimpan: {path}", Col.GREEN))
+    if created_files and ask_yesno("Buat ZIP final berisi berkas yang dihasilkan? ", default="y"):
+        zipf = make_zip_final(created_files, zipname=f"rekom_final_{GENERATED_PREFIX}.zip")
+        print(cl(f"ZIP dibuat: {zipf}", Col.GREEN))
+    input(cl("\nTekan Enter untuk kembali ke menu utama...", Col.YELLOW))
+
+# -------------------------
+# Flow: MBG (ide makan ekonomis)
+# -------------------------
+def flow_mbg(pools):
+    print(cl("\nMODE: IDE MAKANAN MBG — Menu ekonomis ≤ Rp 10.000\n", Col.CYAN))
+    print("Pilih kelompok kebutuhan:")
+    print(" 1. PAUD/TK")
+    print(" 2. SD")
+    print(" 3. SMP/SMA")
+    print(" 4. Ibu Hamil")
+    sel = ask("Pilihan (1-4): ", str, choices=["1","2","3","4"])
+    group_map = {"1":"PAUD","2":"SD","3":"SMP","4":"IBU"}
+    group = group_map[sel]
+    vegetarian = ask_yesno("Filter vegetarian? ", default="n")
+    no_seafood = ask_yesno("Filter tanpa seafood? ", default="y")
+    alergi_raw = input("Alergi (pisah koma) [kosong jika tidak ada]: ").strip().lower()
+    alergi = [a.strip() for a in alergi_raw.split(",") if a.strip()]
+    prefs = {"vegetarian": vegetarian, "no_seafood": no_seafood, "alergies": alergi, "kondisi": []}
+    multipliers = {"carb":1.0,"protein":1.0,"vegetable":1.0,"fruit":1.0,"drink":1.0}
+    if ask_yesno("Ingin mengatur porsi? ", default="n"):
+        multipliers = ask_portion_multipliers(multipliers)
+    comps, summ, note = recommend_for_mbg(group, pools, prefs, multipliers)
+    show_single_result(f"MBG - {group}", comps, summ, note)
+    created_files = []
+    if ask_yesno("Ekspor rekomendasi MBG ini ke CSV? ", default="y"):
+        path = export_single_csv(comps, summ, filename=f"mbg_{GENERATED_PREFIX}_{group}.csv")
+        created_files.append(path)
+        print(cl(f"Disimpan: {path}", Col.GREEN))
+    if ask_yesno("Ekspor juga ke HTML (print-friendly)? ", default="y"):
+        path = export_single_html(comps, summ, title=f"MBG - {group}", filename=f"mbg_{GENERATED_PREFIX}_{group}.html")
+        created_files.append(path)
+        print(cl(f"Disimpan: {path}", Col.GREEN))
+    if created_files and ask_yesno("Buat ZIP final berisi berkas yang dihasilkan? ", default="y"):
+        zipf = make_zip_final(created_files, zipname=f"mbg_final_{GENERATED_PREFIX}.zip")
+        print(cl(f"ZIP dibuat: {zipf}", Col.GREEN))
+    input(cl("\nTekan Enter untuk kembali ke menu utama...", Col.YELLOW))
+
+# -------------------------
+# Flow: Stats
+# -------------------------
+def flow_stats(pools):
+    print(cl("\nSTATISTIK DATABASE\n", Col.CYAN))
+    print(f"Jumlah karbohidrat : {len(pools['carb'])}")
+    print(f"Jumlah protein     : {len(pools['protein'])}")
+    print(f"Jumlah sayur       : {len(pools['vegetable'])}")
+    print(f"Jumlah buah        : {len(pools['fruit'])}")
+    print(f"Jumlah minuman     : {len(pools['drink'])}")
+    sample = []
+    for _ in range(50):
+        comps, summ, note = pick_best_combination(pools, {"kondisi":[], "alergies":[]}, tries=200)
+        sample.append(summ["kcal"])
+    if sample:
+        print(f"Kalori contoh combos: min {min(sample)} / avg {int(sum(sample)/len(sample))} / max {max(sample)}")
+    input(cl("\nTekan Enter untuk kembali ke menu utama...", Col.YELLOW))
+
+# -------------------------
+# HELP / About
+# -------------------------
+def flow_help():
+    lines = [
+        "Petunjuk singkat:",
+        "- Letakkan data makanan di data/foods.json",
+        "- Files generated disimpan di folder 'output/'",
+        "- Profil tersimpan di output/profiles.json",
+        "- Profil sekarang MENYIMPAN alergi & kondisi medis!",
+        "- Ekspor CSV & HTML tersedia, ZIP final bisa dibuat",
+        "- Untuk menyesuaikan porsi gunakan fitur 'adjust portion'",
+        "",
+        "Nutrient keys: kcal/kalori, carbs/karbo, protein,",
+        "fat/lemak, fiber/serat, sugar/gula, sodium, price/harga",
+        "",
+        "BUG FIXED: Input validation untuk nomor profil"
+    ]
+    print_box(lines, title="BANTUAN", color=Col.CYAN)
+    input(cl("\nTekan Enter untuk kembali ke menu utama...", Col.YELLOW))
+
+# -------------------------
+# MAIN MENU
+# -------------------------
+def main():
+    random.seed(42)
+    db = load_json(DATA_PATH)
+    pools = build_pools(db)
+    while True:
+        try:
+            os.system('cls' if os.name=='nt' else 'clear')
+        except:
+            pass
+        print(cl("============================================", Col.GREEN))
+        print(cl("  APLIKASI REKOMENDASI PORSI MAKAN (CLI)", Col.BOLD + Col.GREEN))
+        print(cl("  Pilih mode:", Col.GREEN))
+        print("   1. Pribadi (hitung kalori & rekomendasi)")
+        print("   2. Ide Makanan MBG (menu ekonomis ≤ Rp10.000)")
+        print("   3. Statistik database")
+        print("   4. Profil (simpan/muat/hapus)")
+        print("   5. Bantuan")
+        print("   0. Keluar")
+        print(cl("============================================", Col.GREEN))
+        choice = input("Pilihan (0-5): ").strip()
+        if choice == "1":
+            flow_pribadi(pools)
+        elif choice == "2":
+            flow_mbg(pools)
+        elif choice == "3":
+            flow_stats(pools)
+        elif choice == "4":
+            profile_menu()
+        elif choice == "5":
+            flow_help()
+        elif choice == "0":
+            print(cl("Terima kasih. Sampai jumpa!", Col.YELLOW))
+            break
+        else:
+            print(cl("Pilihan tidak valid. Coba lagi.", Col.RED))
+            input("Tekan Enter...")
+
+if __name__ == "__main__":
+    main()
