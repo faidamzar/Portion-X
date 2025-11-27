@@ -728,6 +728,8 @@ def compute_tdee_from_profile(p):
     tdee = int(round(bmr * act_factor))
     return bmr, tdee
 
+
+
 def ask_portion_multipliers(defaults=None):
     if defaults is None:
         defaults = {"carb":1.0,"protein":1.0,"vegetable":1.0,"fruit":1.0,"drink":1.0}
@@ -836,6 +838,7 @@ def flow_pribadi(pools, loaded_profile=None):
     multipliers = {"carb":1.0,"protein":1.0,"vegetable":1.0,"fruit":1.0,"drink":1.0}
     if ask_yesno("Ingin mengatur porsi sebelum rekomendasi? ", default="n"):
         multipliers = ask_portion_multipliers(multipliers)
+        
 
     single = ask_yesno("Tampilkan 1 rekomendasi menu sekarang? (y) Jika tidak, akan membuat planner 7 hari. ", default="y")
     created_files = []
@@ -865,6 +868,8 @@ def flow_pribadi(pools, loaded_profile=None):
         zipf = make_zip_final(created_files, zipname=f"rekom_final_{GENERATED_PREFIX}.zip")
         print(cl(f"ZIP dibuat: {zipf}", Col.GREEN))
     input(cl("\nTekan Enter untuk kembali ke menu utama...", Col.YELLOW))
+    
+    
 
 # -------------------------
 # Flow: MBG (ide makan ekonomis)
@@ -902,6 +907,9 @@ def flow_mbg(pools):
         zipf = make_zip_final(created_files, zipname=f"mbg_final_{GENERATED_PREFIX}.zip")
         print(cl(f"ZIP dibuat: {zipf}", Col.GREEN))
     input(cl("\nTekan Enter untuk kembali ke menu utama...", Col.YELLOW))
+    
+    
+    
 
 # -------------------------
 # Flow: Stats
@@ -920,6 +928,8 @@ def flow_stats(pools):
     if sample:
         print(f"Kalori contoh combos: min {min(sample)} / avg {int(sum(sample)/len(sample))} / max {max(sample)}")
     input(cl("\nTekan Enter untuk kembali ke menu utama...", Col.YELLOW))
+    
+    
 
 # -------------------------
 # HELP / About
@@ -941,6 +951,9 @@ def flow_help():
     ]
     print_box(lines, title="BANTUAN", color=Col.CYAN)
     input(cl("\nTekan Enter untuk kembali ke menu utama...", Col.YELLOW))
+    
+    
+    
 
 # -------------------------
 # MAIN MENU
@@ -981,7 +994,7 @@ def main():
         else:
             print(cl("Pilihan tidak valid. Coba lagi.", Col.RED))
             input("Tekan Enter...")
+            
 
 if __name__ == "__main__":
     main()
-
